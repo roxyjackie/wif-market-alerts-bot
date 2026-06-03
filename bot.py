@@ -9,20 +9,19 @@ from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime, date
 import pytz
 
-
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ââ Logging ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Config ───────────────────────────────────────────────────────────────────
-DISCORD_BOT_TOKEN          = os.environ["DISCORD_BOT_TOKEN"]
-UNUSUAL_WHALES_API_KEY     = os.environ.get("UNUSUAL_WHALES_API_KEY", "")
+# ââ Config âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
+UNUSUAL_WHALES_API_KEY = os.environ.get("UNUSUAL_WHALES_API_KEY", "")
 
-DAILY_MOVERS_CHANNEL_ID    = int(os.environ["DAILY_MOVERS_CHANNEL_ID"])
-OPTIONS_FLOW_CHANNEL_ID    = int(os.environ["OPTIONS_FLOW_CHANNEL_ID"])
+DAILY_MOVERS_CHANNEL_ID = int(os.environ["DAILY_MOVERS_CHANNEL_ID"])
+OPTIONS_FLOW_CHANNEL_ID = int(os.environ["OPTIONS_FLOW_CHANNEL_ID"])
 HIGH_CONVICTION_CHANNEL_ID = int(os.environ["HIGH_CONVICTION_CHANNEL_ID"])
-DARK_POOL_CHANNEL_ID       = int(os.environ["DARK_POOL_CHANNEL_ID"])
-MARKET_NEWS_CHANNEL_ID     = int(os.environ["MARKET_NEWS_CHANNEL_ID"])
+DARK_POOL_CHANNEL_ID = int(os.environ["DARK_POOL_CHANNEL_ID"])
+MARKET_NEWS_CHANNEL_ID = int(os.environ["MARKET_NEWS_CHANNEL_ID"])
 
 ET = pytz.timezone("America/New_York")
 
@@ -35,14 +34,13 @@ WATCHLIST = [
     "AMD", "COIN", "PLTR", "SOFI", "MARA", "RIOT", "JPM", "GS", "BAC",
 ]
 
-# ── Bot setup ─────────────────────────────────────────────────────────────────
+# ââ Bot setup âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 scheduler = AsyncIOScheduler(timezone=ET)
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 def uw_get(path: str, params: dict = None):
     """Call Unusual Whales API. Returns JSON or None on error."""
     if not UNUSUAL_WHALES_API_KEY:
@@ -55,13 +53,11 @@ def uw_get(path: str, params: dict = None):
         log.warning(f"UW API error {path}: {e}")
         return None
 
-
 def pct(val):
     try:
         return f"{float(val):+.2f}%"
     except Exception:
         return str(val)
-
 
 def usd(val):
     try:
@@ -69,7 +65,6 @@ def usd(val):
         return f"${v:,.0f}" if v >= 1000 else f"${v:.2f}"
     except Exception:
         return str(val)
-
 
 def fmt_large(val):
     try:
@@ -82,8 +77,7 @@ def fmt_large(val):
     except Exception:
         return str(val)
 
-
-# ── Task: Daily Movers (9:31 AM ET, market open) ─────────────────────────────
+# ââ Task: Daily Movers (9:31 AM ET, market open) âââââââââââââââââââââââââââââ
 async def post_daily_movers():
     channel = bot.get_channel(DAILY_MOVERS_CHANNEL_ID)
     if not channel:
@@ -94,13 +88,18 @@ async def post_daily_movers():
 
     for ticker in WATCHLIST:
         try:
-            info = yf.Ticker(ticker).fast_info
-            change = getattr(info, "three_month_change", None)
-            prev_close = getattr(info, "previous_close", None)
-            last = getattr(info, "last_price", None)
+            t = yf.Ticker(ticker)
+            hist = t.history(period="2d", interval="1d")
+            if hist.empty or len(hist) < 2:
+                continue
+            prev_close = hist["Close"].iloc[-2]
+            last = hist["Close"].iloc[-1]
             if prev_close and last:
                 change = (last - prev_close) / prev_close * 100
-                gainers.append((ticker, last, change)) if change > 0 else losers.append((ticker, last, change))
+                if change > 0:
+                    gainers.append((ticker, last, change))
+                else:
+                    losers.append((ticker, last, change))
         except Exception as e:
             log.debug(f"yfinance error {ticker}: {e}")
 
@@ -108,7 +107,7 @@ async def post_daily_movers():
     losers.sort(key=lambda x: x[2])
 
     embed = discord.Embed(
-        title=f"📊 Daily Movers — {now}",
+        title=f"ð Daily Movers â {now}",
         color=0x00C851,
         timestamp=datetime.now(ET),
     )
@@ -116,32 +115,43 @@ async def post_daily_movers():
     if gainers:
         top = gainers[:5]
         embed.add_field(
-            name="🟢 Top Gainers",
-            value="\n".join(f"**{t}** — {usd(p)} ({pct(c)})" for t, p, c in top),
+            name="ð¢ Top Gainers",
+            value="\n".join(f"**{t}** â {usd(p)} ({pct(c)})" for t, p, c in top),
             inline=True,
         )
     if losers:
         bot5 = losers[:5]
         embed.add_field(
-            name="🔴 Top Losers",
-            value="\n".join(f"**{t}** — {usd(p)} ({pct(c)})" for t, p, c in bot5),
+            name="ð´ Top Losers",
+            value="\n".join(f"**{t}** â {usd(p)} ({pct(c)})" for t, p, c in bot5),
             inline=True,
         )
+    if not gainers and not losers:
+        embed.description = "â ï¸ Market data temporarily unavailable. Yahoo Finance may be rate-limiting. Try again in a few minutes."
 
-    embed.set_footer(text="WIF Market Alerts • Data via yfinance")
+    embed.set_footer(text="WIF Market Alerts â¢ Data via yfinance")
     await channel.send(embed=embed)
     log.info("Posted daily movers")
 
-
-# ── Task: Options Flow (every 30 min, 9:30–4:00 ET) ──────────────────────────
+# ââ Task: Options Flow (every 30 min, 9:30â4:00 ET) ââââââââââââââââââââââââââ
 async def post_options_flow():
     channel = bot.get_channel(OPTIONS_FLOW_CHANNEL_ID)
     if not channel:
         return
 
+    if not UNUSUAL_WHALES_API_KEY:
+        embed = discord.Embed(
+            title="ð Unusual Options Flow",
+            description="â ï¸ **Unusual Whales API key not configured.**\nThis feature requires an [Unusual Whales](https://unusualwhales.com) subscription. Add your `UNUSUAL_WHALES_API_KEY` in Railway environment variables.",
+            color=0x7B68EE,
+        )
+        await channel.send(embed=embed)
+        log.info("No options flow data (API key missing)")
+        return
+
     data = uw_get("/options/flow", params={"limit": 10, "order": "premium", "is_unusual": "true"})
     if not data:
-        log.info("No options flow data (API key missing or error)")
+        log.info("No options flow data (API error)")
         return
 
     flows = data.get("data", [])
@@ -149,28 +159,27 @@ async def post_options_flow():
         return
 
     embed = discord.Embed(
-        title="🌊 Unusual Options Flow",
+        title="ð Unusual Options Flow",
         color=0x7B68EE,
         timestamp=datetime.now(ET),
     )
 
     lines = []
     for f in flows[:8]:
-        ticker  = f.get("ticker", "?")
-        side    = "📈 CALL" if str(f.get("put_call", "")).upper() == "CALL" else "📉 PUT"
-        strike  = f.get("strike", "?")
-        expiry  = f.get("expiry", "?")
+        ticker = f.get("ticker", "?")
+        side = "ð CALL" if str(f.get("put_call", "")).upper() == "CALL" else "ð PUT"
+        strike = f.get("strike", "?")
+        expiry = f.get("expiry", "?")
         premium = fmt_large(f.get("premium", 0))
         sentiment = f.get("sentiment", "").upper()
-        lines.append(f"**{ticker}** {side} ${strike} exp {expiry} — {premium} [{sentiment}]")
+        lines.append(f"**{ticker}** {side} ${strike} exp {expiry} â {premium} [{sentiment}]")
 
     embed.description = "\n".join(lines) if lines else "No unusual flow right now."
-    embed.set_footer(text="WIF Market Alerts • Data via Unusual Whales")
+    embed.set_footer(text="WIF Market Alerts â¢ Data via Unusual Whales")
     await channel.send(embed=embed)
     log.info("Posted options flow")
 
-
-# ── Task: High Conviction Alerts (10:00 AM & 2:00 PM ET) ─────────────────────
+# ââ Task: High Conviction Alerts (10:00 AM & 2:00 PM ET) âââââââââââââââââââââ
 async def post_high_conviction():
     channel = bot.get_channel(HIGH_CONVICTION_CHANNEL_ID)
     if not channel:
@@ -183,52 +192,60 @@ async def post_high_conviction():
             hist = t.history(period="5d", interval="1d")
             if hist.empty or len(hist) < 2:
                 continue
-            today_vol  = hist["Volume"].iloc[-1]
-            avg_vol    = hist["Volume"].iloc[:-1].mean()
-            today_chg  = (hist["Close"].iloc[-1] - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2] * 100
-            price      = hist["Close"].iloc[-1]
-            vol_ratio  = today_vol / avg_vol if avg_vol else 0
+            today_vol = hist["Volume"].iloc[-1]
+            avg_vol = hist["Volume"].iloc[:-1].mean()
+            today_chg = (hist["Close"].iloc[-1] - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2] * 100
+            price = hist["Close"].iloc[-1]
+            vol_ratio = today_vol / avg_vol if avg_vol else 0
 
             # High conviction = >2x avg volume AND >2% move
             if vol_ratio >= 2.0 and abs(today_chg) >= 2.0:
-                direction = "🚀" if today_chg > 0 else "💣"
+                direction = "ð" if today_chg > 0 else "ð£"
                 alerts.append((ticker, price, today_chg, vol_ratio, direction))
         except Exception as e:
             log.debug(f"HC scan error {ticker}: {e}")
 
-    if not alerts:
-        return  # Don't post if nothing qualifies
-
-    alerts.sort(key=lambda x: abs(x[2]), reverse=True)
-
     embed = discord.Embed(
-        title="⚡ High Conviction Alerts",
-        description="Stocks with unusual volume (2×+ avg) + significant price move",
+        title="â¡ High Conviction Alerts",
         color=0xFF6B35,
         timestamp=datetime.now(ET),
     )
 
-    for ticker, price, chg, vol_ratio, icon in alerts[:6]:
-        embed.add_field(
-            name=f"{icon} {ticker}",
-            value=f"Price: {usd(price)}\nMove: {pct(chg)}\nVol ratio: {vol_ratio:.1f}×",
-            inline=True,
-        )
+    if not alerts:
+        embed.description = "No stocks meeting high conviction criteria right now (needs 2Ã volume + 2% move)."
+    else:
+        embed.description = "Stocks with unusual volume (2Ã+ avg) + significant price move"
+        alerts.sort(key=lambda x: abs(x[2]), reverse=True)
+        for ticker, price, chg, vol_ratio, icon in alerts[:6]:
+            embed.add_field(
+                name=f"{icon} {ticker}",
+                value=f"Price: {usd(price)}\nMove: {pct(chg)}\nVol ratio: {vol_ratio:.1f}Ã",
+                inline=True,
+            )
+        log.info(f"Posted {len(alerts)} high conviction alerts")
 
-    embed.set_footer(text="WIF Market Alerts • Scan via yfinance")
+    embed.set_footer(text="WIF Market Alerts â¢ Scan via yfinance")
     await channel.send(embed=embed)
-    log.info(f"Posted {len(alerts)} high conviction alerts")
 
-
-# ── Task: Dark Pool Activity (11:00 AM & 3:00 PM ET) ─────────────────────────
+# ââ Task: Dark Pool Activity (11:00 AM & 3:00 PM ET) âââââââââââââââââââââââââ
 async def post_dark_pool():
     channel = bot.get_channel(DARK_POOL_CHANNEL_ID)
     if not channel:
         return
 
+    if not UNUSUAL_WHALES_API_KEY:
+        embed = discord.Embed(
+            title="ð Dark Pool Activity",
+            description="â ï¸ **Unusual Whales API key not configured.**\nThis feature requires an [Unusual Whales](https://unusualwhales.com) subscription. Add your `UNUSUAL_WHALES_API_KEY` in Railway environment variables.",
+            color=0x2C2C54,
+        )
+        await channel.send(embed=embed)
+        log.info("No dark pool data (API key missing)")
+        return
+
     data = uw_get("/darkpool/recent", params={"limit": 10})
     if not data:
-        log.info("No dark pool data (API key missing or error)")
+        log.info("No dark pool data (API error)")
         return
 
     trades = data.get("data", [])
@@ -236,7 +253,7 @@ async def post_dark_pool():
         return
 
     embed = discord.Embed(
-        title="🌑 Dark Pool Activity",
+        title="ð Dark Pool Activity",
         color=0x2C2C54,
         timestamp=datetime.now(ET),
     )
@@ -244,18 +261,17 @@ async def post_dark_pool():
     lines = []
     for tr in trades[:8]:
         ticker = tr.get("ticker", "?")
-        size   = tr.get("size", 0)
-        price  = tr.get("price", 0)
-        value  = fmt_large(float(size) * float(price)) if size and price else "?"
-        lines.append(f"**{ticker}** — {int(size):,} shares @ {usd(price)} = **{value}**")
+        size = tr.get("size", 0)
+        price = tr.get("price", 0)
+        value = fmt_large(float(size) * float(price)) if size and price else "?"
+        lines.append(f"**{ticker}** â {int(size):,} shares @ {usd(price)} = **{value}**")
 
     embed.description = "\n".join(lines) if lines else "No significant dark pool prints."
-    embed.set_footer(text="WIF Market Alerts • Data via Unusual Whales")
+    embed.set_footer(text="WIF Market Alerts â¢ Data via Unusual Whales")
     await channel.send(embed=embed)
     log.info("Posted dark pool activity")
 
-
-# ── Task: Market News (8:00 AM, 12:00 PM, 4:15 PM ET) ────────────────────────
+# ââ Task: Market News (8:00 AM, 12:00 PM, 4:15 PM ET) ââââââââââââââââââââââââ
 async def post_market_news():
     channel = bot.get_channel(MARKET_NEWS_CHANNEL_ID)
     if not channel:
@@ -264,7 +280,7 @@ async def post_market_news():
     data = uw_get("/news/headlines", params={"limit": 6})
 
     embed = discord.Embed(
-        title="📰 Market News",
+        title="ð° Market News",
         color=0x1DA1F2,
         timestamp=datetime.now(ET),
     )
@@ -274,24 +290,29 @@ async def post_market_news():
         lines = []
         for a in articles[:6]:
             headline = a.get("title", "")
-            url      = a.get("url", "")
-            src      = a.get("source", "")
+            url = a.get("url", "")
+            src = a.get("source", "")
             if headline and url:
-                lines.append(f"[{headline}]({url}) — *{src}*")
+                lines.append(f"[{headline}]({url}) â *{src}*")
         embed.description = "\n\n".join(lines) if lines else "Check financial news sources for the latest."
     else:
         # Fallback: post SPY/QQQ summary when no API key
         try:
-            spy  = yf.Ticker("SPY").fast_info
-            qqq  = yf.Ticker("QQQ").fast_info
-            spy_p  = getattr(spy, "last_price", "?")
-            qqq_p  = getattr(qqq, "last_price", "?")
-            spy_pc = getattr(spy, "previous_close", None)
-            qqq_pc = getattr(qqq, "previous_close", None)
-            spy_chg = pct((spy_p - spy_pc) / spy_pc * 100) if spy_pc else "?"
-            qqq_chg = pct((qqq_p - qqq_pc) / qqq_pc * 100) if qqq_pc else "?"
-            embed.add_field(name="SPY", value=f"{usd(spy_p)} ({spy_chg})", inline=True)
-            embed.add_field(name="QQQ", value=f"{usd(qqq_p)} ({qqq_chg})", inline=True)
+            spy_hist = yf.Ticker("SPY").history(period="2d", interval="1d")
+            qqq_hist = yf.Ticker("QQQ").history(period="2d", interval="1d")
+
+            if len(spy_hist) >= 2:
+                spy_p = spy_hist["Close"].iloc[-1]
+                spy_pc = spy_hist["Close"].iloc[-2]
+                spy_chg = pct((spy_p - spy_pc) / spy_pc * 100)
+                embed.add_field(name="SPY", value=f"{usd(spy_p)} ({spy_chg})", inline=True)
+
+            if len(qqq_hist) >= 2:
+                qqq_p = qqq_hist["Close"].iloc[-1]
+                qqq_pc = qqq_hist["Close"].iloc[-2]
+                qqq_chg = pct((qqq_p - qqq_pc) / qqq_pc * 100)
+                embed.add_field(name="QQQ", value=f"{usd(qqq_p)} ({qqq_chg})", inline=True)
+
             embed.description = "Market snapshot (add Unusual Whales key for full news feed)"
         except Exception:
             embed.description = "Market data temporarily unavailable."
@@ -300,37 +321,35 @@ async def post_market_news():
     await channel.send(embed=embed)
     log.info("Posted market news")
 
-
-# ── Bot events ────────────────────────────────────────────────────────────────
+# ââ Bot events ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
-    # Market News:        8:00 AM, 12:00 PM, 4:15 PM ET
-    scheduler.add_job(post_market_news,    CronTrigger(hour="8,12",  minute="0",  timezone=ET))
-    scheduler.add_job(post_market_news,    CronTrigger(hour="16",    minute="15", timezone=ET))
+    # Market News: 8:00 AM, 12:00 PM, 4:15 PM ET
+    scheduler.add_job(post_market_news, CronTrigger(hour="8,12", minute="0", timezone=ET))
+    scheduler.add_job(post_market_news, CronTrigger(hour="16", minute="15", timezone=ET))
 
-    # Daily Movers:       9:31 AM ET (just after open)
-    scheduler.add_job(post_daily_movers,   CronTrigger(hour="9",     minute="31", timezone=ET))
+    # Daily Movers: 9:31 AM ET (just after open)
+    scheduler.add_job(post_daily_movers, CronTrigger(hour="9", minute="31", timezone=ET))
 
-    # Options Flow:       every 30 min from 9:30 AM to 4:00 PM ET, weekdays
-    scheduler.add_job(post_options_flow,   CronTrigger(
+    # Options Flow: every 30 min from 9:30 AM to 4:00 PM ET, weekdays
+    scheduler.add_job(post_options_flow, CronTrigger(
         day_of_week="mon-fri", hour="9-15", minute="30,0", timezone=ET
     ))
 
-    # High Conviction:    10:00 AM and 2:00 PM ET, weekdays
+    # High Conviction: 10:00 AM and 2:00 PM ET, weekdays
     scheduler.add_job(post_high_conviction, CronTrigger(
         day_of_week="mon-fri", hour="10,14", minute="0", timezone=ET
     ))
 
-    # Dark Pool:          11:00 AM and 3:00 PM ET, weekdays
-    scheduler.add_job(post_dark_pool,      CronTrigger(
+    # Dark Pool: 11:00 AM and 3:00 PM ET, weekdays
+    scheduler.add_job(post_dark_pool, CronTrigger(
         day_of_week="mon-fri", hour="11,15", minute="0", timezone=ET
     ))
 
     scheduler.start()
     log.info("Scheduler started. All jobs registered.")
-
 
 @bot.command(name="movers")
 async def cmd_movers(ctx):
@@ -361,10 +380,9 @@ async def cmd_news(ctx):
 async def cmd_status(ctx):
     """Show bot status."""
     jobs = scheduler.get_jobs()
-    msg = f"✅ **WIF Market Alerts is running**\n{len(jobs)} scheduled jobs active.\n"
+    msg = f"â **WIF Market Alerts is running**\n{len(jobs)} scheduled jobs active.\n"
     msg += "**Manual commands:** `!movers` `!flow` `!darkpool` `!hc` `!news`"
     await ctx.send(msg)
 
-
-# ── Run ───────────────────────────────────────────────────────────────────────
+# ââ Run âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 bot.run(DISCORD_BOT_TOKEN)
