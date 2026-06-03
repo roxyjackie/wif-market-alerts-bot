@@ -9,6 +9,7 @@ from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime, date
 import pytz
 
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ WATCHLIST = [
 
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 scheduler = AsyncIOScheduler(timezone=ET)
 
