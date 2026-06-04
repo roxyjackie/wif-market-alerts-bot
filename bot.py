@@ -1,13 +1,13 @@
 import os
 import logging
 import requests
-import yfinance as yf
 import discord
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime, date
 import pytz
+import time
 
 # ââ Logging ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 # ââ Config âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 UNUSUAL_WHALES_API_KEY = os.environ.get("UNUSUAL_WHALES_API_KEY", "")
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "")
 
 DAILY_MOVERS_CHANNEL_ID = int(os.environ["DAILY_MOVERS_CHANNEL_ID"])
 OPTIONS_FLOW_CHANNEL_ID = int(os.environ["OPTIONS_FLOW_CHANNEL_ID"])
@@ -28,7 +29,8 @@ ET = pytz.timezone("America/New_York")
 UW_BASE = "https://api.unusualwhales.com/api"
 UW_HEADERS = {"Authorization": f"Bearer {UNUSUAL_WHALES_API_KEY}", "Accept": "application/json"}
 
-# Watchlist for high-conviction scanner
+FINNHUB_BASE = "https://finnhub.io/api/v1"
+
 WATCHLIST = [
     "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
     "AMD", "COIN", "PLTR", "SOFI", "MARA", "RIOT", "JPM", "GS", "BAC",
@@ -52,6 +54,57 @@ def uw_get(path: str, params: dict = None):
     except Exception as e:
         log.warning(f"UW API error {path}: {e}")
         return None
+
+def finnhub_quote(symbol: str):
+    """Get real-time quote from Finnhub. Returns dict or None.
+    Keys: c (current price), d (change $), dp (change %), pc (prev close)
+    """
+    if not FINNHUB_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            f"{FINNHUB_BASE}/quote",
+            params={"symbol": symbol, "token": FINNHUB_API_KEY},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not data or data.get("c", 0) == 0:
+            return None
+        return data
+    except Exception as e:
+        log.debug(f"Finnhub quote error {symbol}: {e}")
+        return None
+
+def finnhub_candles(symbol: str, days: int = 7):
+    """Get daily OHLCV candles from Finnhub. Returns list of dicts or []."""
+    if not FINNHUB_API_KEY:
+        return []
+    try:
+        now_ts = int(time.time())
+        from_ts = now_ts - (days * 2 * 86400)  # 2x buffer for weekends
+        r = requests.get(
+            f"{FINNHUB_BASE}/stock/candle",
+            params={
+                "symbol": symbol,
+                "resolution": "D",
+                "from": from_ts,
+                "to": now_ts,
+                "token": FINNHUB_API_KEY,
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if data.get("s") != "ok" or not data.get("c"):
+            return []
+        return [
+            {"c": c, "v": v, "t": t}
+            for c, v, t in zip(data["c"], data["v"], data["t"])
+        ]
+    except Exception as e:
+        log.debug(f"Finnhub candle error {symbol}: {e}")
+        return []
 
 def pct(val):
     try:
@@ -77,31 +130,38 @@ def fmt_large(val):
     except Exception:
         return str(val)
 
-# ââ Task: Daily Movers (9:31 AM ET, market open) âââââââââââââââââââââââââââââ
+# ââ Task: Daily Movers (9:31 AM ET) ââââââââââââââââââââââââââââââââââââââââââ
 async def post_daily_movers():
     channel = bot.get_channel(DAILY_MOVERS_CHANNEL_ID)
     if not channel:
         return
 
     now = datetime.now(ET).strftime("%B %d, %Y")
-    gainers, losers = [], []
 
+    if not FINNHUB_API_KEY:
+        embed = discord.Embed(
+            title=f"ð Daily Movers â {now}",
+            description=(
+                "â ï¸ **Finnhub API key not configured.**\n"
+                "Sign up free at [finnhub.io](https://finnhub.io) and add "
+                "`FINNHUB_API_KEY` to Railway environment variables."
+            ),
+            color=0x00C851,
+        )
+        await channel.send(embed=embed)
+        return
+
+    gainers, losers = [], []
     for ticker in WATCHLIST:
-        try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="2d", interval="1d")
-            if hist.empty or len(hist) < 2:
-                continue
-            prev_close = hist["Close"].iloc[-2]
-            last = hist["Close"].iloc[-1]
-            if prev_close and last:
-                change = (last - prev_close) / prev_close * 100
-                if change > 0:
-                    gainers.append((ticker, last, change))
-                else:
-                    losers.append((ticker, last, change))
-        except Exception as e:
-            log.debug(f"yfinance error {ticker}: {e}")
+        q = finnhub_quote(ticker)
+        if not q:
+            continue
+        price = q["c"]
+        change_pct = q["dp"]
+        if change_pct > 0:
+            gainers.append((ticker, price, change_pct))
+        elif change_pct < 0:
+            losers.append((ticker, price, change_pct))
 
     gainers.sort(key=lambda x: x[2], reverse=True)
     losers.sort(key=lambda x: x[2])
@@ -113,23 +173,21 @@ async def post_daily_movers():
     )
 
     if gainers:
-        top = gainers[:5]
         embed.add_field(
             name="ð¢ Top Gainers",
-            value="\n".join(f"**{t}** â {usd(p)} ({pct(c)})" for t, p, c in top),
+            value="\n".join(f"**{t}** â {usd(p)} ({pct(c)})" for t, p, c in gainers[:5]),
             inline=True,
         )
     if losers:
-        bot5 = losers[:5]
         embed.add_field(
             name="ð´ Top Losers",
-            value="\n".join(f"**{t}** â {usd(p)} ({pct(c)})" for t, p, c in bot5),
+            value="\n".join(f"**{t}** â {usd(p)} ({pct(c)})" for t, p, c in losers[:5]),
             inline=True,
         )
     if not gainers and not losers:
-        embed.description = "â ï¸ Market data temporarily unavailable. Yahoo Finance may be rate-limiting. Try again in a few minutes."
+        embed.description = "â ï¸ No market data right now. Markets may be closed."
 
-    embed.set_footer(text="WIF Market Alerts â¢ Data via yfinance")
+    embed.set_footer(text="WIF Market Alerts â¢ Data via Finnhub")
     await channel.send(embed=embed)
     log.info("Posted daily movers")
 
@@ -142,7 +200,11 @@ async def post_options_flow():
     if not UNUSUAL_WHALES_API_KEY:
         embed = discord.Embed(
             title="ð Unusual Options Flow",
-            description="â ï¸ **Unusual Whales API key not configured.**\nThis feature requires an [Unusual Whales](https://unusualwhales.com) subscription. Add your `UNUSUAL_WHALES_API_KEY` in Railway environment variables.",
+            description=(
+                "â ï¸ **Unusual Whales API key not configured.**\n"
+                "This feature requires an [Unusual Whales](https://unusualwhales.com) "
+                "subscription. Add your `UNUSUAL_WHALES_API_KEY` in Railway environment variables."
+            ),
             color=0x7B68EE,
         )
         await channel.send(embed=embed)
@@ -163,7 +225,6 @@ async def post_options_flow():
         color=0x7B68EE,
         timestamp=datetime.now(ET),
     )
-
     lines = []
     for f in flows[:8]:
         ticker = f.get("ticker", "?")
@@ -185,23 +246,39 @@ async def post_high_conviction():
     if not channel:
         return
 
+    if not FINNHUB_API_KEY:
+        embed = discord.Embed(
+            title="â¡ High Conviction Alerts",
+            description=(
+                "â ï¸ **Finnhub API key not configured.**\n"
+                "Sign up free at [finnhub.io](https://finnhub.io) and add "
+                "`FINNHUB_API_KEY` to Railway environment variables."
+            ),
+            color=0xFF6B35,
+        )
+        await channel.send(embed=embed)
+        return
+
     alerts = []
     for ticker in WATCHLIST:
         try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="5d", interval="1d")
-            if hist.empty or len(hist) < 2:
+            candles = finnhub_candles(ticker, days=7)
+            if len(candles) < 2:
                 continue
-            today_vol = hist["Volume"].iloc[-1]
-            avg_vol = hist["Volume"].iloc[:-1].mean()
-            today_chg = (hist["Close"].iloc[-1] - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2] * 100
-            price = hist["Close"].iloc[-1]
+            candles.sort(key=lambda x: x["t"])
+            today = candles[-1]
+            prev_days = candles[:-1]
+            avg_vol = sum(c["v"] for c in prev_days) / len(prev_days) if prev_days else 0
+            prev_close = candles[-2]["c"]
+            today_close = today["c"]
+            today_vol = today["v"]
+            if not prev_close or not today_close:
+                continue
+            change_pct = (today_close - prev_close) / prev_close * 100
             vol_ratio = today_vol / avg_vol if avg_vol else 0
-
-            # High conviction = >2x avg volume AND >2% move
-            if vol_ratio >= 2.0 and abs(today_chg) >= 2.0:
-                direction = "ð" if today_chg > 0 else "ð£"
-                alerts.append((ticker, price, today_chg, vol_ratio, direction))
+            if vol_ratio >= 2.0 and abs(change_pct) >= 2.0:
+                direction = "ð" if change_pct > 0 else "ð£"
+                alerts.append((ticker, today_close, change_pct, vol_ratio, direction))
         except Exception as e:
             log.debug(f"HC scan error {ticker}: {e}")
 
@@ -210,7 +287,6 @@ async def post_high_conviction():
         color=0xFF6B35,
         timestamp=datetime.now(ET),
     )
-
     if not alerts:
         embed.description = "No stocks meeting high conviction criteria right now (needs 2Ã volume + 2% move)."
     else:
@@ -224,7 +300,7 @@ async def post_high_conviction():
             )
         log.info(f"Posted {len(alerts)} high conviction alerts")
 
-    embed.set_footer(text="WIF Market Alerts â¢ Scan via yfinance")
+    embed.set_footer(text="WIF Market Alerts â¢ Data via Finnhub")
     await channel.send(embed=embed)
 
 # ââ Task: Dark Pool Activity (11:00 AM & 3:00 PM ET) âââââââââââââââââââââââââ
@@ -236,7 +312,11 @@ async def post_dark_pool():
     if not UNUSUAL_WHALES_API_KEY:
         embed = discord.Embed(
             title="ð Dark Pool Activity",
-            description="â ï¸ **Unusual Whales API key not configured.**\nThis feature requires an [Unusual Whales](https://unusualwhales.com) subscription. Add your `UNUSUAL_WHALES_API_KEY` in Railway environment variables.",
+            description=(
+                "â ï¸ **Unusual Whales API key not configured.**\n"
+                "This feature requires an [Unusual Whales](https://unusualwhales.com) "
+                "subscription. Add your `UNUSUAL_WHALES_API_KEY` in Railway environment variables."
+            ),
             color=0x2C2C54,
         )
         await channel.send(embed=embed)
@@ -257,7 +337,6 @@ async def post_dark_pool():
         color=0x2C2C54,
         timestamp=datetime.now(ET),
     )
-
     lines = []
     for tr in trades[:8]:
         ticker = tr.get("ticker", "?")
@@ -295,27 +374,25 @@ async def post_market_news():
             if headline and url:
                 lines.append(f"[{headline}]({url}) â *{src}*")
         embed.description = "\n\n".join(lines) if lines else "Check financial news sources for the latest."
-    else:
-        # Fallback: post SPY/QQQ summary when no API key
+    elif FINNHUB_API_KEY:
         try:
-            spy_hist = yf.Ticker("SPY").history(period="2d", interval="1d")
-            qqq_hist = yf.Ticker("QQQ").history(period="2d", interval="1d")
-
-            if len(spy_hist) >= 2:
-                spy_p = spy_hist["Close"].iloc[-1]
-                spy_pc = spy_hist["Close"].iloc[-2]
-                spy_chg = pct((spy_p - spy_pc) / spy_pc * 100)
-                embed.add_field(name="SPY", value=f"{usd(spy_p)} ({spy_chg})", inline=True)
-
-            if len(qqq_hist) >= 2:
-                qqq_p = qqq_hist["Close"].iloc[-1]
-                qqq_pc = qqq_hist["Close"].iloc[-2]
-                qqq_chg = pct((qqq_p - qqq_pc) / qqq_pc * 100)
-                embed.add_field(name="QQQ", value=f"{usd(qqq_p)} ({qqq_chg})", inline=True)
-
+            spy = finnhub_quote("SPY")
+            qqq = finnhub_quote("QQQ")
+            nvda = finnhub_quote("NVDA")
+            if spy:
+                embed.add_field(name="SPY", value=f"{usd(spy['c'])} ({pct(spy['dp'])})", inline=True)
+            if qqq:
+                embed.add_field(name="QQQ", value=f"{usd(qqq['c'])} ({pct(qqq['dp'])})", inline=True)
+            if nvda:
+                embed.add_field(name="NVDA", value=f"{usd(nvda['c'])} ({pct(nvda['dp'])})", inline=True)
             embed.description = "Market snapshot (add Unusual Whales key for full news feed)"
         except Exception:
             embed.description = "Market data temporarily unavailable."
+    else:
+        embed.description = (
+            "â ï¸ Add `FINNHUB_API_KEY` in Railway variables for market data.\n"
+            "Optionally add `UNUSUAL_WHALES_API_KEY` for a full news feed."
+        )
 
     embed.set_footer(text="WIF Market Alerts")
     await channel.send(embed=embed)
@@ -326,24 +403,15 @@ async def post_market_news():
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
-    # Market News: 8:00 AM, 12:00 PM, 4:15 PM ET
     scheduler.add_job(post_market_news, CronTrigger(hour="8,12", minute="0", timezone=ET))
     scheduler.add_job(post_market_news, CronTrigger(hour="16", minute="15", timezone=ET))
-
-    # Daily Movers: 9:31 AM ET (just after open)
     scheduler.add_job(post_daily_movers, CronTrigger(hour="9", minute="31", timezone=ET))
-
-    # Options Flow: every 30 min from 9:30 AM to 4:00 PM ET, weekdays
     scheduler.add_job(post_options_flow, CronTrigger(
         day_of_week="mon-fri", hour="9-15", minute="30,0", timezone=ET
     ))
-
-    # High Conviction: 10:00 AM and 2:00 PM ET, weekdays
     scheduler.add_job(post_high_conviction, CronTrigger(
         day_of_week="mon-fri", hour="10,14", minute="0", timezone=ET
     ))
-
-    # Dark Pool: 11:00 AM and 3:00 PM ET, weekdays
     scheduler.add_job(post_dark_pool, CronTrigger(
         day_of_week="mon-fri", hour="11,15", minute="0", timezone=ET
     ))
@@ -380,8 +448,15 @@ async def cmd_news(ctx):
 async def cmd_status(ctx):
     """Show bot status."""
     jobs = scheduler.get_jobs()
-    msg = f"â **WIF Market Alerts is running**\n{len(jobs)} scheduled jobs active.\n"
-    msg += "**Manual commands:** `!movers` `!flow` `!darkpool` `!hc` `!news`"
+    finnhub_st = "â Connected" if FINNHUB_API_KEY else "â Missing â add FINNHUB_API_KEY in Railway"
+    uw_st = "â Connected" if UNUSUAL_WHALES_API_KEY else "â Missing â optional paid API"
+    msg = (
+        f"â **WIF Market Alerts is running**\n"
+        f"{len(jobs)} scheduled jobs active.\n"
+        f"ð Finnhub: {finnhub_st}\n"
+        f"ð Unusual Whales: {uw_st}\n"
+        f"**Commands:** `!movers` `!flow` `!darkpool` `!hc` `!news`"
+    )
     await ctx.send(msg)
 
 # ââ Run âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
